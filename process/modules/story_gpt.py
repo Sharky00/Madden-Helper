@@ -3,6 +3,7 @@ import os, json
 from pathlib import Path
 from openai import OpenAI
 from paths import REFERENCE_DIR
+import re
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -12,6 +13,14 @@ except Exception:
 client = OpenAI()  # uses OPENAI_API_KEY
 
 # (reuse your existing extract_team_lines with the REG-only + final-status filter)
+
+def _strip_first_part2_block(txt: str) -> str:
+    """
+    Remove everything starting from the first line that begins with 'Part 2'
+    (case-insensitive) to the end of the string.
+    """
+    m = re.search(r'(?mi)^\s*Part\s*2\b.*$', txt)
+    return txt[:m.start()].rstrip() if m else txt
 
 
 def load_references(names: list[str], max_chars: int = 4000) -> str:
@@ -162,9 +171,9 @@ def generate_story_from_file(
     # 4) Free-flow prompt (no bullets, no cap)
     system = (
         "You are an NFL analyst. Use only the provided schedule lines and reference text. "
-        "Treat the template (if present) as stylistic guidance—do not follow it rigidly. "
         "Write in a cohesive, free-flow, human tone. Do not invent games or stats beyond the lines."
     )
+
     user = (
         f"TEAM: {team}\n"
         f"Regular-season record (from provided lines): {record}\n"
@@ -172,21 +181,22 @@ def generate_story_from_file(
         f"Schedule lines (regular season, completed games only):\n{schedule_block}\n\n"
         "Reference (template guidance first, then official tie-break rules):\n"
         f"{refs_text}\n\n"
-        "Write a natural, paragraph-style season recap (no bullet points). Aim for 2–4 short paragraphs:\n"
-        "• A punchy lede summarizing the arc.\n"
-        "• Narrative body weaving in key wins/losses, notable margins, and trends grounded in the lines.\n"
-        "• A concise tie-breaker outlook using the rulebook order (head-to-head, division record, common games, "
-        "conference record, strength of victory/schedule). If something isn’t derivable from the lines, say so briefly.\n"
-        "Keep it cohesive and grounded in the lines; if something isn’t explicit, phrase it neutrally without claiming missing data. "
-        "Close with a concise tie-breaker outlook consistent with the rulebook (head-to-head, division record, common games, conference record, strength of victory/schedule)."
+        # >>> NEW: only Part 1
+        "Output ONLY a single section titled 'Part 1: Season narrative' as free-flow paragraphs. "
+        "Do NOT include any 'Part 2' sections, bullet lists, or a separate tiebreaker section—"
+        "the application will add Part 2 after your text."
     )
 
     resp = client.responses.create(
         model=model,
         input=[{"role": "system", "content": system},
             {"role": "user", "content": user}],
+        # no temperature if your model rejects it
     )
 
     body = resp.output_text.strip()
-    title = f"{team} — {record}"        # ← Title line you wanted
+    body = _strip_first_part2_block(body)  # <<< SAFETY BELT applied here
+
+    title = f"{team} — {record}"
     return f"{title}\n\n{body}"
+
