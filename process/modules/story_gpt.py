@@ -105,49 +105,88 @@ def list_teams_from_final(processed_path: Path) -> set[str]:
                 if away: teams.add(away)
     return teams
 
+def compute_basic_stats(grouped_json: dict, team: str) -> dict:
+    """W-L(-T) and point differential from REG games marked final (status 2 or 3)."""
+    FINAL_STATUSES = {2, 3}
+    w = l = t = diff = 0
+    reg = grouped_json.get("reg", {})
+    if isinstance(reg, dict):
+        for matchups in reg.values():
+            if not isinstance(matchups, dict):
+                continue
+            for game in matchups.values():
+                if not isinstance(game, dict) or game.get("status") not in FINAL_STATUSES:
+                    continue
+                if team not in (game.get("homeTeamName"), game.get("awayTeamName")):
+                    continue
+                pf = _score_for(game, team)
+                pa = _score_against(game, team)
+                if pf is None or pa is None:
+                    continue
+                diff += (pf - pa)
+                if pf > pa: w += 1
+                elif pf < pa: l += 1
+                else: t += 1
+    return {"REG_W": w, "REG_L": l, "REG_T": t, "POINT_DIFF": diff}
+
+def _format_record(stats: dict) -> str:
+    return f"{stats['REG_W']}-{stats['REG_L']}" + (f"-{stats['REG_T']}" if stats['REG_T'] else "")
+
 def generate_story_from_file(
     processed_path: Path,
     team: str,
     model: str = "gpt-4o-mini",
     include_preseason: bool = False,
-    references: list[str] | None = None,  # e.g. ["tiebreakers", "tiebreaker_story_template"]
+    references: list[str] | None = None,
 ) -> str:
-    """Return a free-flow narrative (for GUI) using schedule lines + optional refs as guidance."""
     if not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError("OPENAI_API_KEY not set. Put it in .env or your environment.")
 
     data = json.loads(Path(processed_path).read_text(encoding="utf-8"))
+
+    # 1) Build schedule lines (REG only, final games)
     lines = extract_team_lines(data, team, include_preseason=include_preseason)
     schedule_block = "\n".join(lines[:150])
 
-    refs_text = load_references(references) if references else ""
-    # Split refs so prompt is clear (template = guidance, rulebook = facts)
-    # Expecting files named: reference/tiebreakers.md and reference/tiebreaker_story_template.md
-    # If you pass in both (recommended), order them as [ "tiebreaker_story_template", "tiebreakers" ].
+    # 2) Compute stats for the prompt
+    stats = compute_basic_stats(data, team)
+    record = _format_record(stats)
+    point_diff = f"{stats['POINT_DIFF']:+d}"
+    record = f"{stats['REG_W']}-{stats['REG_L']}" + (f"-{stats['REG_T']}" if stats['REG_T'] else "")
+    point_diff = f"{stats['POINT_DIFF']:+d}"
 
+    # 3) Load soft guidance (template first) + rulebook
+    refs = references or ["tiebreaker_story_template", "tiebreakers"]
+    refs_text = load_references(refs)
+
+    # 4) Free-flow prompt (no bullets, no cap)
     system = (
-        "You are an NFL analyst. Use only the provided schedule lines plus the reference text. "
-        "Write in a natural, human tone. The template (if provided) is guidance for tone/sections, "
-        "NOT a strict format to copy. Do not invent games or stats beyond what the lines imply."
+        "You are an NFL analyst. Use only the provided schedule lines and reference text. "
+        "Treat the template (if present) as stylistic guidance—do not follow it rigidly. "
+        "Write in a cohesive, free-flow, human tone. Do not invent games or stats beyond the lines."
     )
-
     user = (
-        f"TEAM: {team}\n\n"
+        f"TEAM: {team}\n"
+        f"Regular-season record (from provided lines): {record}\n"
+        f"Point differential: {point_diff}\n\n"
         f"Schedule lines (regular season, completed games only):\n{schedule_block}\n\n"
-        "Reference material (first = stylistic template guidance, second = official tiebreak rules if present):\n"
+        "Reference (template guidance first, then official tie-break rules):\n"
         f"{refs_text}\n\n"
-        "Please produce a short free-flow report:\n"
-        "- Start with a punchy one-sentence headline.\n"
-        "- Then 5–8 concise bullets on key wins/losses, margins, trends.\n"
-        "- End with a brief tiebreaker note informed by the rules (head-to-head, division record, common games, conference record, strength of victory/schedule). "
-        "If a detail isn’t derivable from the lines, say so briefly.\n"
-        "Keep it under ~200 words."
+        "Write a natural, paragraph-style season recap (no bullet points). Aim for 2–4 short paragraphs:\n"
+        "• A punchy lede summarizing the arc.\n"
+        "• Narrative body weaving in key wins/losses, notable margins, and trends grounded in the lines.\n"
+        "• A concise tie-breaker outlook using the rulebook order (head-to-head, division record, common games, "
+        "conference record, strength of victory/schedule). If something isn’t derivable from the lines, say so briefly.\n"
+        "Keep it cohesive and grounded in the lines; if something isn’t explicit, phrase it neutrally without claiming missing data. "
+        "Close with a concise tie-breaker outlook consistent with the rulebook (head-to-head, division record, common games, conference record, strength of victory/schedule)."
     )
 
     resp = client.responses.create(
         model=model,
         input=[{"role": "system", "content": system},
-               {"role": "user", "content": user}],
-        temperature=0.7,
+            {"role": "user", "content": user}],
     )
-    return resp.output_text
+
+    body = resp.output_text.strip()
+    title = f"{team} — {record}"        # ← Title line you wanted
+    return f"{title}\n\n{body}"
