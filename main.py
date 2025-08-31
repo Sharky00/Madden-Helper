@@ -1,10 +1,9 @@
-from gui.main_page import main as gui_main
-import os
-from dotenv import load_dotenv
-load_dotenv()  # loads .env from project root
+# main.py (top-level)
+import os, sys
+# ensure project root is importable
+sys.path.insert(0, os.path.dirname(__file__))
 
-if not os.getenv("OPENAI_API_KEY"):
-    raise SystemExit("OPENAI_API_KEY is not set (check your .env).")
+from gui.launcher import main as launcher_main
 
 if __name__ == "__main__":
-    gui_main()
+    launcher_main()
